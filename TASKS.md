@@ -44,14 +44,15 @@
 - [x] **【削除/リネーム】** `vim_src/neovim-0.12.2/src/nvim/sha256.c`
   - `sha256.c.orig` にリネームしてC側のビルド対象から完全に除外。
 
-### 2. `path.c` の移植
-- [ ] **【作成】** `src/path.rs`
-  - Cの `path.c` 内の文字列操作や絶対・相対パス判定関数をRustで実装。
-- [ ] **【変更】** `src/lib.rs`
+### 2. `path.c` の移植（インクリメンタルな一部移行中）
+- [/] **【作成】** `src/path.rs`
+  - 判定系関数（`path_is_absolute`, `path_has_drive_letter`, `path_is_url`, `path_with_url`, `vim_isAbsName`）をRustで移植。
+- [x] **【変更】** `src/lib.rs`
   - `mod path;` を追加。
-- [ ] **//【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt`
-  - ソースコード一覧から `path.c` を除外。
-- [ ] **【削除/リネーム】** `vim_src/neovim-0.12.2/src/nvim/path.c`
+- [-] **【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt`
+  - （不要。インクリメンタル置換のためCの `path.c` 自体は残して差分のみ無効化）
+- [/] **【変更】** `vim_src/neovim-0.12.2/src/nvim/path.c` (および `path.h`)
+  - 移植済みの関数定義を `#if 0` で無効化し、`path.h` に手動プロトタイプを定義。
 
 ---
 

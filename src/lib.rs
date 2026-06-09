@@ -1,4 +1,5 @@
 pub mod sha256;
+pub mod path;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn reovim_hello() {
