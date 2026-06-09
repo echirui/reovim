@@ -5,6 +5,22 @@ const NUL: u8 = 0;
 unsafe extern "C" {
     // Declared in Neovim's mbyte.c
     pub fn utf_head_off(base: *const c_char, p: *const c_char) -> c_int;
+
+    // Declared in Neovim's option_vars.h / globals.h
+    #[allow(dead_code)]
+    pub static p_fic: c_int;
+
+    // Declared in Neovim's mbyte.c
+    pub fn mb_strcmp_ic(ic: bool, s1: *const c_char, s2: *const c_char) -> c_int;
+    pub fn mb_strnicmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
+
+    // libc functions
+    pub fn strncmp(s1: *const c_char, s2: *const c_char, n: usize) -> c_int;
+
+    // Windows compatibility helpers from mbyte.c
+    pub fn utf_ptr2char(p: *const c_char) -> c_int;
+    pub fn utfc_ptr2len(p: *const c_char) -> c_int;
+    pub fn utf_fold(c: c_int) -> c_int;
 }
 
 #[inline(always)]
@@ -398,15 +414,162 @@ pub unsafe extern "C" fn path_has_exp_wildcard(mut p: *const c_char) -> bool {
     false
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn path_fnamecmp(fname1: *const c_char, fname2: *const c_char) -> c_int {
+    if fname1.is_null() || fname2.is_null() {
+        return 0;
+    }
+    #[cfg(not(unix))]
+    {
+        // Simple delegating for Windows compile check
+        let len1 = unsafe { libc::strlen(fname1) };
+        let len2 = unsafe { libc::strlen(fname2) };
+        unsafe { path_fnamencmp(fname1, fname2, std::cmp::max(len1, len2)) }
+    }
+    #[cfg(unix)]
+    {
+        unsafe { mb_strcmp_ic(p_fic != 0, fname1, fname2) }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn path_fnamencmp(fname1: *const c_char, fname2: *const c_char, len: usize) -> c_int {
+    if fname1.is_null() || fname2.is_null() || len == 0 {
+        return 0;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut p1 = fname1;
+        let mut p2 = fname2;
+        let mut remaining_len = len;
+        let mut c1 = 0;
+        let mut c2 = 0;
+
+        while remaining_len > 0 {
+            c1 = unsafe { utf_ptr2char(p1) };
+            c2 = unsafe { utf_ptr2char(p2) };
+            if c1 == 0 || c2 == 0 {
+                break;
+            }
+            let is_sep1 = c1 == b'/' as c_int || c1 == b'\\' as c_int;
+            let is_sep2 = c2 == b'/' as c_int || c2 == b'\\' as c_int;
+            let both_seps = is_sep1 && is_sep2;
+
+            let not_equal = if both_seps {
+                false
+            } else if unsafe { p_fic != 0 } {
+                c1 != c2 && unsafe { utf_fold(c1) != utf_fold(c2) }
+            } else {
+                c1 != c2
+            };
+
+            if not_equal {
+                break;
+            }
+            let step = unsafe { utfc_ptr2len(p1) } as usize;
+            if step > remaining_len {
+                break;
+            }
+            remaining_len -= step;
+            p1 = unsafe { p1.add(step) };
+            p2 = unsafe { p2.add(utfc_ptr2len(p2) as usize) };
+        }
+
+        c1 = unsafe { utf_ptr2char(p1) };
+        c2 = unsafe { utf_ptr2char(p2) };
+        if unsafe { p_fic != 0 } {
+            unsafe { utf_fold(c1) - utf_fold(c2) }
+        } else {
+            c1 - c2
+        }
+    }
+    #[cfg(unix)]
+    {
+        unsafe {
+            if p_fic != 0 {
+                mb_strnicmp(fname1, fname2, len)
+            } else {
+                strncmp(fname1, fname2, len)
+            }
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn path_with_extension(path: *const c_char, extension: *const c_char) -> bool {
+    if path.is_null() || extension.is_null() {
+        return false;
+    }
+    unsafe {
+        let mut last_dot = std::ptr::null();
+        let mut curr = path;
+        while *curr != 0 {
+            if *curr == b'.' as c_char {
+                last_dot = curr;
+            }
+            curr = curr.add(1);
+        }
+        if last_dot.is_null() {
+            return false;
+        }
+        mb_strcmp_ic(p_fic != 0, last_dot.add(1), extension) == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::ffi::CString;
 
-    // A mock implementation of utf_head_off for Rust unit tests (since we don't link mbyte.c in cargo test)
+    #[unsafe(no_mangle)]
+    pub static mut p_fic: c_int = 0;
+
     #[unsafe(no_mangle)]
     pub unsafe extern "C" fn utf_head_off(_base: *const c_char, _p: *const c_char) -> c_int {
         0
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mb_strcmp_ic(ic: bool, s1: *const c_char, s2: *const c_char) -> c_int {
+        let mut p1 = s1;
+        let mut p2 = s2;
+        unsafe {
+            while *p1 != 0 && *p2 != 0 {
+                let c1 = if ic { (*p1 as u8).to_ascii_lowercase() } else { *p1 as u8 };
+                let c2 = if ic { (*p2 as u8).to_ascii_lowercase() } else { *p2 as u8 };
+                if c1 != c2 {
+                    return (c1 as c_int) - (c2 as c_int);
+                }
+                p1 = p1.add(1);
+                p2 = p2.add(1);
+            }
+            let c1 = if ic { (*p1 as u8).to_ascii_lowercase() } else { *p1 as u8 };
+            let c2 = if ic { (*p2 as u8).to_ascii_lowercase() } else { *p2 as u8 };
+            (c1 as c_int) - (c2 as c_int)
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mb_strnicmp(s1: *const c_char, s2: *const c_char, mut n: usize) -> c_int {
+        let mut p1 = s1;
+        let mut p2 = s2;
+        unsafe {
+            while n > 0 && *p1 != 0 && *p2 != 0 {
+                let c1 = (*p1 as u8).to_ascii_lowercase();
+                let c2 = (*p2 as u8).to_ascii_lowercase();
+                if c1 != c2 {
+                    return (c1 as c_int) - (c2 as c_int);
+                }
+                p1 = p1.add(1);
+                p2 = p2.add(1);
+                n -= 1;
+            }
+            if n == 0 {
+                0
+            } else {
+                ((*p1 as u8).to_ascii_lowercase() as c_int) - ((*p2 as u8).to_ascii_lowercase() as c_int)
+            }
+        }
     }
 
     #[test]
@@ -461,6 +624,21 @@ mod tests {
         unsafe {
             assert!(path_has_wildcard(p1.as_ptr()));
             assert!(!path_has_wildcard(p2.as_ptr()));
+        }
+    }
+
+    #[test]
+    fn test_path_fnamecmp_unix() {
+        #[cfg(unix)]
+        {
+            let p1 = CString::new("file.txt").unwrap();
+            let p2 = CString::new("FILE.TXT").unwrap();
+            unsafe {
+                p_fic = 1; // ignore case
+                assert_eq!(path_fnamecmp(p1.as_ptr(), p2.as_ptr()), 0);
+                p_fic = 0; // case sensitive
+                assert_ne!(path_fnamecmp(p1.as_ptr(), p2.as_ptr()), 0);
+            }
         }
     }
 }
