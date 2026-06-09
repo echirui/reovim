@@ -6,8 +6,14 @@ const MAXPATHL: usize = 4096;
 #[cfg(unix)]
 const PATHSEPSTR: &[u8] = b"/\0";
 
+#[cfg(unix)]
+const PATHSEP: u8 = b'/';
+
 #[cfg(not(unix))]
 const PATHSEPSTR: &[u8] = b"\\\0";
+
+#[cfg(not(unix))]
+const PATHSEP: u8 = b'\\';
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -75,6 +81,16 @@ unsafe extern "C" {
 
     #[cfg(not(unix))]
     pub fn slash_adjust(p: *mut c_char);
+
+    // Memory and OS utility functions from Neovim
+    pub fn xmalloc(size: usize) -> *mut c_char;
+    pub fn xrealloc(ptr: *mut c_char, size: usize) -> *mut c_char;
+    pub fn xfree(ptr: *mut c_char);
+    pub fn xstrdup(s: *const c_char) -> *mut c_char;
+    pub fn os_isdir(name: *const c_char) -> bool;
+    pub fn os_fileinfo(name: *const c_char, file_info: *mut FileInfo) -> bool;
+    pub fn mb_toupper(a: c_int) -> c_int;
+    pub fn mb_tolower(a: c_int) -> c_int;
 }
 
 #[inline(always)]
@@ -895,6 +911,450 @@ pub unsafe extern "C" fn vim_FullName(fname: *const c_char, buf: *mut c_char, le
     rv
 }
 
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shorten_dir_len(str_: *mut c_char, trim_len: c_int) {
+    let tail = unsafe { path_tail(str_) };
+    let mut d = str_;
+    let mut skip = false;
+    let mut dirchunk_len = 0;
+    let mut s = str_;
+    loop {
+        if s >= tail {
+            unsafe {
+                *d = *s;
+                d = d.add(1);
+                if *s as u8 == NUL {
+                    break;
+                }
+                s = s.add(1);
+            }
+        } else if unsafe { vim_ispathsep(*s as c_int) } {
+            unsafe {
+                *d = *s;
+                d = d.add(1);
+                skip = false;
+                dirchunk_len = 0;
+                s = s.add(1);
+            }
+        } else if !skip {
+            unsafe {
+                *d = *s;
+                d = d.add(1);
+                if *s as u8 != b'~' && *s as u8 != b'.' {
+                    dirchunk_len += 1;
+                    if dirchunk_len >= trim_len {
+                        skip = true;
+                    }
+                }
+                let mut l = utfc_ptr2len(s);
+                while l > 1 {
+                    s = s.add(1);
+                    *d = *s;
+                    d = d.add(1);
+                    l -= 1;
+                }
+                s = s.add(1);
+            }
+        } else {
+            unsafe {
+                s = s.add(1);
+            }
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn shorten_dir(str_: *mut c_char) {
+    unsafe { shorten_dir_len(str_, 1) };
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn dir_of_file_exists(fname: *mut c_char) -> bool {
+    let p = unsafe { path_tail_with_sep(fname) };
+    if p == fname {
+        return true;
+    }
+    let c = unsafe { *p };
+    unsafe { *p = NUL as c_char };
+    let retval = unsafe { os_isdir(fname) };
+    unsafe { *p = c };
+    retval
+}
+
+unsafe fn do_concat_fnames(fname1: *mut c_char, len1: usize, fname2: *const c_char, len2: usize, sep: bool) -> *mut c_char {
+    if sep && unsafe { *fname1 as u8 != NUL && !after_pathsep(fname1, fname1.add(len1)) } {
+        unsafe {
+            *fname1.add(len1) = PATHSEP as c_char;
+            std::ptr::copy(fname2, fname1.add(len1 + 1), len2 + 1);
+        }
+    } else {
+        unsafe {
+            std::ptr::copy(fname2, fname1.add(len1), len2 + 1);
+        }
+    }
+    fname1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn concat_fnames(fname1: *const c_char, fname2: *const c_char, sep: bool) -> *mut c_char {
+    let len1 = unsafe { strlen(fname1) };
+    let len2 = unsafe { strlen(fname2) };
+    let dest = unsafe { xmalloc(len1 + len2 + 3) };
+    unsafe {
+        std::ptr::copy(fname1, dest, len1 + 1);
+        do_concat_fnames(dest, len1, fname2, len2, sep)
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn concat_fnames_realloc(fname1: *mut c_char, fname2: *const c_char, sep: bool) -> *mut c_char {
+    let len1 = unsafe { strlen(fname1) };
+    let len2 = unsafe { strlen(fname2) };
+    let new_ptr = unsafe { xrealloc(fname1, len1 + len2 + 3) };
+    unsafe { do_concat_fnames(new_ptr, len1, fname2, len2, sep) }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn add_pathsep(p: *mut c_char) -> bool {
+    let len = unsafe { strlen(p) };
+    if unsafe { *p as u8 != NUL && !after_pathsep(p, p.add(len)) } {
+        let pathsep_len = PATHSEPSTR.len();
+        if len > MAXPATHL - pathsep_len {
+            return false;
+        }
+        unsafe {
+            std::ptr::copy_nonoverlapping(PATHSEPSTR.as_ptr() as *const c_char, p.add(len), pathsep_len);
+        }
+    }
+    true
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn FullName_save(fname: *const c_char, force: bool) -> *mut c_char {
+    if fname.is_null() {
+        return std::ptr::null_mut();
+    }
+    let buf = unsafe { xmalloc(MAXPATHL) };
+    if unsafe { vim_FullName(fname, buf, MAXPATHL, force) } == 0 {
+        unsafe {
+            xfree(buf);
+            xstrdup(fname)
+        }
+    } else {
+        buf
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn save_abs_path(name: *const c_char) -> *mut c_char {
+    if !unsafe { path_is_absolute(name) } {
+        unsafe { FullName_save(name, true) }
+    } else {
+        unsafe { xstrdup(name) }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn fix_fname(fname: *const c_char) -> *mut c_char {
+    #[cfg(unix)]
+    {
+        unsafe { FullName_save(fname, true) }
+    }
+    #[cfg(not(unix))]
+    {
+        use std::ffi::CStr;
+        let s = unsafe { CStr::from_ptr(fname) }.to_bytes();
+        let has_double_dots = s.windows(2).any(|w| w == b"..");
+        let has_double_slashes = s.windows(2).any(|w| w == b"//");
+        let has_double_backslashes = s.windows(2).any(|w| w == b"\\\\");
+        let starts_with_slash = !s.is_empty() && (s[0] == b'/' || s[0] == b'\\');
+
+        if !unsafe { vim_isAbsName(fname) }
+            || has_double_dots
+            || has_double_slashes
+            || has_double_backslashes
+            || starts_with_slash
+        {
+            unsafe { FullName_save(fname, false) }
+        } else {
+            let res = unsafe { xstrdup(fname) };
+            #[cfg(target_os = "windows")]
+            {
+                unsafe { path_fix_case(res) };
+            }
+            res
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn same_directory(f1: *mut c_char, f2: *mut c_char) -> bool {
+    let mut ffname = [0 as c_char; MAXPATHL];
+    if f1.is_null() || f2.is_null() {
+        return false;
+    }
+    unsafe { vim_FullName(f1, ffname.as_mut_ptr(), MAXPATHL, false) };
+    let t1 = unsafe { path_tail_with_sep(ffname.as_mut_ptr()) };
+    let t2 = unsafe { path_tail_with_sep(f2) };
+    let offset1 = unsafe { t1.offset_from(ffname.as_ptr()) };
+    let offset2 = unsafe { t2.offset_from(f2) };
+    offset1 == offset2 && unsafe { pathcmp(ffname.as_ptr(), f2, offset1 as c_int) } == 0
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn pathcmp(p: *const c_char, q: *const c_char, maxlen: c_int) -> c_int {
+    let mut i = 0;
+    let mut j = 0;
+    let mut s: *const c_char = std::ptr::null();
+
+    loop {
+        if maxlen >= 0 && (i >= maxlen as usize || j >= maxlen as usize) {
+            break;
+        }
+
+        let c1 = unsafe { utf_ptr2char(p.add(i)) };
+        let c2 = unsafe { utf_ptr2char(q.add(j)) };
+
+        // End of "p": check if "q" also ends or just has a slash.
+        if c1 == NUL as c_int {
+            if c2 == NUL as c_int {
+                return 0;
+            }
+            s = q;
+            i = j;
+            break;
+        }
+
+        // End of "q": check if "p" just has a slash.
+        if c2 == NUL as c_int {
+            s = p;
+            break;
+        }
+
+        let match_fic = unsafe {
+            if p_fic != 0 {
+                mb_toupper(c1) != mb_toupper(c2)
+            } else {
+                c1 != c2
+            }
+        };
+
+        #[cfg(target_os = "windows")]
+        let match_fic = match_fic && !(
+            (c1 == b'/' as c_int && c2 == b'\\' as c_int)
+            || (c1 == b'\\' as c_int && c2 == b'/' as c_int)
+        );
+
+        if match_fic {
+            if vim_ispathsep(c1) {
+                return -1;
+            }
+            if vim_ispathsep(c2) {
+                return 1;
+            }
+            return unsafe {
+                if p_fic != 0 {
+                    mb_toupper(c1) - mb_toupper(c2)
+                } else {
+                    c1 - c2
+                }
+            };
+        }
+
+        i += unsafe { utfc_ptr2len(p.add(i)) } as usize;
+        j += unsafe { utfc_ptr2len(q.add(j)) } as usize;
+    }
+
+    if s.is_null() {
+        return 0;
+    }
+
+    let c1 = unsafe { utf_ptr2char(s.add(i)) };
+    let c2 = unsafe { utf_ptr2char(s.add(i + utfc_ptr2len(s.add(i)) as usize)) };
+
+    // ignore a trailing slash, but not "//" or ":/"
+    let is_slash = if cfg!(target_os = "windows") {
+        c1 == b'/' as c_int || c1 == b'\\' as c_int
+    } else {
+        c1 == b'/' as c_int
+    };
+
+    if c2 == NUL as c_int
+        && i > 0
+        && !unsafe { after_pathsep(s, s.add(i)) }
+        && is_slash
+    {
+        return 0;
+    }
+
+    if s == q {
+        return -1;
+    }
+    1
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn simplify_filename(filename: *mut c_char) -> usize {
+    let mut components = 0;
+    let mut stripping_disabled = false;
+    let mut relative = true;
+
+    let mut p = filename;
+    #[cfg(target_os = "windows")]
+    {
+        if unsafe { *p as u8 != NUL && *p.add(1) as u8 == b':' } {
+            p = unsafe { p.add(2) };
+        }
+    }
+
+    if unsafe { vim_ispathsep(*p as c_int) } {
+        relative = false;
+        while unsafe { vim_ispathsep(*p as c_int) } {
+            p = unsafe { p.add(1) };
+        }
+    }
+    let mut start = p;
+    let mut p_end = unsafe { p.add(strlen(p)) };
+
+    #[cfg(unix)]
+    {
+        // Posix says that "//path" is unchanged but "///path" is "/path".
+        if start > unsafe { filename.add(2) } {
+            unsafe {
+                std::ptr::copy(p, filename.add(1), p_end.offset_from(p) as usize + 1);
+                p_end = p_end.offset(-(p.offset_from(filename.add(1)) as isize));
+                p = filename.add(1);
+                start = p;
+            }
+        }
+    }
+
+    loop {
+        // At this point "p" is pointing to the char following a single "/"
+        // or "p" is at the "start" of the (absolute or relative) path name.
+        if unsafe { vim_ispathsep(*p as c_int) } {
+            unsafe {
+                std::ptr::copy(p.add(1), p, p_end.offset_from(p.add(1)) as usize + 1);
+                p_end = p_end.offset(-1);
+            }
+        } else if unsafe { *p as u8 == b'.' && (vim_ispathsep(*p.add(1) as c_int) || *p.add(1) as u8 == NUL) } {
+            if p == start && relative {
+                p = unsafe { p.add(1 + (*p.add(1) as u8 != NUL) as usize) };
+            } else {
+                let mut tail = unsafe { p.add(1) };
+                if unsafe { *p.add(1) as u8 != NUL } {
+                    while unsafe { vim_ispathsep(*tail as c_int) } {
+                        tail = unsafe { tail.add(utfc_ptr2len(tail) as usize) };
+                    }
+                } else if p > start {
+                    p = unsafe { p.offset(-1) };
+                }
+                unsafe {
+                    std::ptr::copy(tail, p, p_end.offset_from(tail) as usize + 1);
+                    p_end = p_end.offset(-(tail.offset_from(p) as isize));
+                }
+            }
+        } else if unsafe { *p as u8 == b'.' && *p.add(1) as u8 == b'.' && (vim_ispathsep(*p.add(2) as c_int) || *p.add(2) as u8 == NUL) } {
+            let mut tail = unsafe { p.add(2) };
+            while unsafe { vim_ispathsep(*tail as c_int) } {
+                tail = unsafe { tail.add(utfc_ptr2len(tail) as usize) };
+            }
+
+            if components > 0 {
+                let mut do_strip = false;
+
+                if !stripping_disabled {
+                    let saved_char = unsafe { *p.offset(-1) };
+                    unsafe { *p.offset(-1) = NUL as c_char };
+                    let mut file_info = FileInfo { _data: [0; 160] };
+                    if !unsafe { os_fileinfo_link(filename, &mut file_info) } {
+                        do_strip = true;
+                    }
+                    unsafe { *p.offset(-1) = saved_char };
+
+                    p = unsafe { p.offset(-1) };
+                    while p > start && !unsafe { after_pathsep(start, p) } {
+                        let offset = unsafe { utf_head_off(start, p.offset(-1)) + 1 };
+                        p = unsafe { p.offset(-(offset as isize)) };
+                    }
+
+                    if !do_strip {
+                        let saved_char2 = unsafe { *tail };
+                        unsafe { *tail = NUL as c_char };
+                        if unsafe { os_fileinfo(filename, &mut file_info) } {
+                            do_strip = true;
+                        } else {
+                            stripping_disabled = true;
+                        }
+                        unsafe { *tail = saved_char2 };
+
+                        if do_strip {
+                            let mut new_file_info = FileInfo { _data: [0; 160] };
+                            if p == start && relative {
+                                unsafe { os_fileinfo(b".\0".as_ptr() as *const c_char, &mut new_file_info) };
+                            } else {
+                                let saved_char3 = unsafe { *p };
+                                unsafe { *p = NUL as c_char };
+                                unsafe { os_fileinfo(filename, &mut new_file_info) };
+                                unsafe { *p = saved_char3 };
+                            }
+
+                            if !unsafe { os_fileinfo_id_equal(&file_info, &new_file_info) } {
+                                do_strip = false;
+                            }
+                        }
+                    }
+                }
+
+                if !do_strip {
+                    p = tail;
+                    components = 0;
+                } else {
+                    if p == start && relative && unsafe { *tail.offset(-1) as u8 == b'.' } {
+                        unsafe {
+                            *p = b'.' as c_char;
+                            p = p.add(1);
+                            *p = NUL as c_char;
+                        }
+                    } else {
+                        if p > start && unsafe { *tail.offset(-1) as u8 == b'.' } {
+                            p = unsafe { p.offset(-1) };
+                        }
+                        unsafe {
+                            std::ptr::copy(tail, p, p_end.offset_from(tail) as usize + 1);
+                            p_end = p_end.offset(-(tail.offset_from(p) as isize));
+                        }
+                    }
+                    components -= 1;
+                }
+            } else if p == start && !relative {
+                unsafe {
+                    std::ptr::copy(tail, p, p_end.offset_from(tail) as usize + 1);
+                    p_end = p_end.offset(-(tail.offset_from(p) as isize));
+                }
+            } else {
+                if p == unsafe { start.add(2) } && unsafe { *p.offset(-2) as u8 == b'.' } {
+                    unsafe {
+                        std::ptr::copy(p, p.offset(-2), p_end.offset_from(p) as usize + 1);
+                        p_end = p_end.offset(-2);
+                        tail = tail.offset(-2);
+                    }
+                }
+                p = tail;
+            }
+        } else {
+            components += 1;
+            p = unsafe { path_next_component(p) as *mut c_char };
+        }
+
+        if unsafe { *p as u8 == NUL } {
+            break;
+        }
+    }
+
+    unsafe { p_end.offset_from(filename) as usize }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1192,6 +1652,187 @@ mod tests {
             assert_eq!(res, 1); // OK
             let res_str = std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap();
             assert_eq!(res_str, "/home/user/docs/file.txt");
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn xmalloc(size: usize) -> *mut c_char {
+        let layout = std::alloc::Layout::from_size_align(size + 8, 8).unwrap();
+        unsafe {
+            let ptr = std::alloc::alloc(layout);
+            *(ptr as *mut usize) = size;
+            ptr.add(8) as *mut c_char
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn xfree(ptr: *mut c_char) {
+        if ptr.is_null() {
+            return;
+        }
+        unsafe {
+            let orig_ptr = ptr.offset(-8) as *mut u8;
+            let size = *(orig_ptr as *mut usize);
+            let layout = std::alloc::Layout::from_size_align(size + 8, 8).unwrap();
+            std::alloc::dealloc(orig_ptr, layout);
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn xrealloc(ptr: *mut c_char, size: usize) -> *mut c_char {
+        if ptr.is_null() {
+            return unsafe { xmalloc(size) };
+        }
+        unsafe {
+            let orig_ptr = ptr.offset(-8) as *mut u8;
+            let old_size = *(orig_ptr as *mut usize);
+            let layout = std::alloc::Layout::from_size_align(old_size + 8, 8).unwrap();
+            let new_ptr = std::alloc::realloc(orig_ptr, layout, size + 8);
+            *(new_ptr as *mut usize) = size;
+            new_ptr.add(8) as *mut c_char
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn xstrdup(s: *const c_char) -> *mut c_char {
+        unsafe {
+            let len = strlen(s);
+            let dest = xmalloc(len + 1);
+            std::ptr::copy_nonoverlapping(s, dest, len + 1);
+            dest
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn os_isdir(name: *const c_char) -> bool {
+        let s = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap_or("");
+        s.contains("dir") || s == "."
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn os_fileinfo(name: *const c_char, _file_info: *mut FileInfo) -> bool {
+        let s = unsafe { std::ffi::CStr::from_ptr(name) }.to_str().unwrap_or("");
+        s.contains("exist") || s == "." || (s.starts_with('/') && !s.contains("missing"))
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mb_toupper(a: c_int) -> c_int {
+        if a >= b'a' as c_int && a <= b'z' as c_int {
+            a - 32
+        } else {
+            a
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn mb_tolower(a: c_int) -> c_int {
+        if a >= b'A' as c_int && a <= b'Z' as c_int {
+            a + 32
+        } else {
+            a
+        }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn utf_ptr2char(p: *const c_char) -> c_int {
+        if p.is_null() {
+            return 0;
+        }
+        unsafe { *p as c_int }
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C" fn utfc_ptr2len(p: *const c_char) -> c_int {
+        if p.is_null() || unsafe { *p } == 0 {
+            return 0;
+        }
+        let b = unsafe { *p as u8 };
+        if b < 0x80 {
+            1
+        } else if (b & 0xE0) == 0xC0 {
+            2
+        } else if (b & 0xF0) == 0xE0 {
+            3
+        } else if (b & 0xF8) == 0xF0 {
+            4
+        } else {
+            1
+        }
+    }
+
+    #[test]
+    fn test_shorten_dir() {
+        let path = CString::new("/home/user/docs/file.txt").unwrap();
+        let ptr = path.into_raw();
+        unsafe {
+            shorten_dir(ptr);
+            let res = std::ffi::CStr::from_ptr(ptr).to_str().unwrap();
+            #[cfg(unix)]
+            assert_eq!(res, "/h/u/d/file.txt");
+            let _ = CString::from_raw(ptr);
+        }
+    }
+
+    #[test]
+    fn test_dir_of_file_exists() {
+        let path1 = CString::new("/home/user/dir/file.txt").unwrap();
+        let path2 = CString::new("file.txt").unwrap();
+        let ptr1 = path1.into_raw();
+        let ptr2 = path2.into_raw();
+        unsafe {
+            assert!(dir_of_file_exists(ptr1));
+            assert!(dir_of_file_exists(ptr2));
+            let _ = CString::from_raw(ptr1);
+            let _ = CString::from_raw(ptr2);
+        }
+    }
+
+    #[test]
+    fn test_concat_fnames() {
+        let f1 = CString::new("/home/user").unwrap();
+        let f2 = CString::new("docs").unwrap();
+        unsafe {
+            let res = concat_fnames(f1.as_ptr(), f2.as_ptr(), true);
+            let res_str = std::ffi::CStr::from_ptr(res).to_str().unwrap();
+            #[cfg(unix)]
+            assert_eq!(res_str, "/home/user/docs");
+            xfree(res);
+        }
+    }
+
+    #[test]
+    fn test_add_pathsep() {
+        let mut buf = [0 as c_char; 100];
+        let p = CString::new("path").unwrap();
+        unsafe {
+            std::ptr::copy_nonoverlapping(p.as_ptr(), buf.as_mut_ptr(), 5);
+            assert!(add_pathsep(buf.as_mut_ptr()));
+            let res_str = std::ffi::CStr::from_ptr(buf.as_ptr()).to_str().unwrap();
+            #[cfg(unix)]
+            assert_eq!(res_str, "path/");
+        }
+    }
+
+    #[test]
+    fn test_simplify_filename() {
+        let path = CString::new("/home/user/../user/docs/./file.txt").unwrap();
+        let ptr = path.into_raw();
+        unsafe {
+            let new_len = simplify_filename(ptr);
+            let res = std::ffi::CStr::from_ptr(ptr).to_str().unwrap();
+            #[cfg(unix)]
+            assert_eq!(res, "/home/user/docs/file.txt");
+            assert_eq!(new_len, res.len());
+            let _ = CString::from_raw(ptr);
+        }
+    }
+
+    #[test]
+    fn test_pathcmp() {
+        let p1 = CString::new("/home/user/docs").unwrap();
+        let p2 = CString::new("/home/user/docs/").unwrap();
+        unsafe {
+            assert_eq!(pathcmp(p1.as_ptr(), p2.as_ptr(), -1), 0);
         }
     }
 }
