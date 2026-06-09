@@ -20,10 +20,10 @@
   ```
 
 ### 2. Neovim側: ビルドプロセスへのRustリンク追加
-- [ ] **【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt`
+- [x] **【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt`
   - Cargoを呼び出して `libreovim.a` をビルドする `add_custom_target` または `add_custom_command` を追加。
   - Neovimバイナリのターゲットである `nvim_bin` に対し、`libreovim.a` をリンクする設定を追加。
-- [ ] **【変更】** `vim_src/neovim-0.12.2/src/nvim/main.c`
+- [x] **【変更】** `vim_src/neovim-0.12.2/src/nvim/main.c`
   - `reovim_hello` の C 向けプロトタイプ宣言（`extern void reovim_hello(void);`）を追加。
   - `main` 関数の初期化ステップで `reovim_hello()` を呼び出すように変更。
 
@@ -32,18 +32,17 @@
 ## 📦 フェーズ 2: 依存の少ないユーティリティモジュールの移植
 
 ### 1. `sha256.c` の移植
-- [ ] **【変更】** `Cargo.toml`
-  - 必要に応じて暗号化用クレートを追加（例：`sha2 = "0.10"`）。
-- [ ] **【作成】** `src/sha256.rs`
-  - Cの `sha256.c` の以下のインターフェースをRustで実装し、FFI経由で公開。
-    - `sha256_key(...)`
-    - `sha256_self_test(...)` など。
-- [ ] **【変更】** `src/lib.rs`
+- [x] **【変更】** `Cargo.toml`
+  - 依存関係を追加せずにピュアRustで完全に等価な動作を自己完結実装。
+- [x] **【作成】** `src/sha256.rs`
+  - Cの `sha256.c` のすべてのインターフェースをRustで実装し、FFI経由で公開。
+    - `sha256_start`, `sha256_update`, `sha256_finish`, `sha256_bytes`, `sha256_self_test`
+- [x] **【変更】** `src/lib.rs`
   - `mod sha256;` を追加してモジュールを公開。
-- [ ] **【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt`
-  - ターゲット `nvim_bin` のソースコード一覧から `sha256.c` を除外。
-- [ ] **【削除/リネーム】** `vim_src/neovim-0.12.2/src/nvim/sha256.c`
-  - 二重定義を防ぐため、ファイルを削除するか、あるいは `sha256.c.orig` 等にリネームしてビルド対象から完全に外す。
+- [x] **【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt` (および `sha256.h` の修正)
+  - ソースコード一覧（glob）から `sha256.c` を除外。また `sha256.h` に関数プロトタイプを手動定義。
+- [x] **【削除/リネーム】** `vim_src/neovim-0.12.2/src/nvim/sha256.c`
+  - `sha256.c.orig` にリネームしてC側のビルド対象から完全に除外。
 
 ### 2. `path.c` の移植
 - [ ] **【作成】** `src/path.rs`

@@ -1,3 +1,5 @@
+pub mod sha256;
+
 #[unsafe(no_mangle)]
 pub extern "C" fn reovim_hello() {
     println!("Hello from Rust!");
