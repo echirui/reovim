@@ -46,7 +46,7 @@
 
 ### 2. `path.c` の移植（インクリメンタルな一部移行中）
 - [/] **【作成】** `src/path.rs`
-  - 主要な文字列操作・判定系ヘルパー（`path_is_absolute`, `path_has_drive_letter`, `path_is_url`, `path_with_url`, `vim_isAbsName`, `vim_ispathsep`, `vim_ispathsep_nocolon`, `vim_ispathlistsep`, `is_path_head`, `get_past_head`, `path_head_length`, `path_tail`, `path_tail_with_sep`, `after_pathsep`, `invocation_path_tail`, `path_next_component`, `path_has_wildcard`, `path_has_exp_wildcard` の計18関数）をRustで移植完了。
+  - 主要な文字列操作・判定系ヘルパーに加えて、OS依存・複雑なパス解決系関数（`path_is_absolute`, `path_has_drive_letter`, `path_is_url`, `path_with_url`, `vim_isAbsName`, `vim_ispathsep`, `vim_ispathsep_nocolon`, `vim_ispathlistsep`, `is_path_head`, `get_past_head`, `path_head_length`, `path_tail`, `path_tail_with_sep`, `after_pathsep`, `invocation_path_tail`, `path_next_component`, `path_has_wildcard`, `path_has_exp_wildcard`, `path_full_compare`, `path_fix_case`, `path_try_shorten_fname`, `path_shorten_fname`, `path_full_dir_name`, `append_path`, `path_to_absolute`, `vim_FullName` の計26関数）をRustで移植およびテスト完了。
 - [x] **【変更】** `src/lib.rs`
   - `mod path;` を追加。
 - [-] **【変更】** `vim_src/neovim-0.12.2/src/nvim/CMakeLists.txt`
