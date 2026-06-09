@@ -7,13 +7,13 @@
 ## 🛠 フェーズ 1: ビルドシステムの統合 (CMake + Cargo)
 
 ### 1. Rust側: スタティックライブラリ化
-- [ ] **【変更】** `Cargo.toml`
+- [x] **【変更】** `Cargo.toml`
   - `[lib]` セクションを追加。
   - `crate-type = ["staticlib"]` を設定。
-- [ ] **【作成】** `src/lib.rs`
+- [x] **【作成】** `src/lib.rs`
   - Cから呼び出し可能なダミー関数 `reovim_hello` を定義。
   ```rust
-  #[no_mangle]
+  #[unsafe(no_mangle)]
   pub extern "C" fn reovim_hello() {
       println!("Hello from Rust!");
   }
